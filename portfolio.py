@@ -11,17 +11,6 @@ class Environment:
     def writeBack(self):
         self.history.to_csv('data/history.csv')
 
-
-class Stock:
-    def __init__(self, env, isin):
-        if (not isin in env.isins.index):
-            raise ValueError('Unknown ISIN')
-        self.isin = isin
-        mask = env.history['isin'] == isin
-        self.price = env.history.loc[mask]
-        print(self.price)
-
-
 class Portfolio:
     def __init__(self, env, pf):
         self.bigtable = pd.concat([env.history,pf],sort=False)[['isin','last','amount','spent']]
