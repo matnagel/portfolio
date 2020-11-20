@@ -5,15 +5,22 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
 
-from matplotlib.backends.backend_gtk3cairo import (
-    FigureCanvasGTK3Cairo as FigureCanvas)
+#from matplotlib.backends.backend_gtk3cairo import (
+#    FigureCanvasGTK3Cairo as FigureCanvas)
+from matplotlib.backends.backend_gtk3agg import (
+    FigureCanvasGTK3Agg as FigureCanvas)
 
 class Handler:
     def onExit(self, button):
         Gtk.main_quit()
 
+def percentageFormater(treeView, cell, model, iter, userdata):
+    (columnNumber, formatString) = userdata
+    val = model.get(iter, columnNumber)[0]
+    cell.set_property("text", formatString.format(val))
+
 class PandasViewer():
-    def __init__(self, df, viewer):
+    def __init__(self, df, viewer, columnFormats = {}):
         self.df = df
         self.store = Gtk.ListStore()
         ctypes = self.extractColumnTypes(df)
@@ -31,6 +38,10 @@ class PandasViewer():
             # renderer.connect("edited", self.editCell, i)
             column = Gtk.TreeViewColumn(col, renderer, text=i)
             column.set_resizable(True)
+
+            if col in columnFormats:
+                column.set_cell_data_func(renderer, percentageFormater,
+                        (i, columnFormats[col]))
             self.viewer.append_column(column)
 
     def extractColumnTypes(self, df):
@@ -54,7 +65,7 @@ class PandasViewer():
     #             self.df.iat[row, cellNum] = newText
     #             print(df)
 
-env = Environment()
+env = Environment.withStandardPaths()
 
 builder = Gtk.Builder()
 builder.add_from_file("gui.glade")
@@ -64,22 +75,30 @@ df = env.isins.reset_index()
 viewer = builder.get_object("basicStockView")
 isinViewer = PandasViewer(df, viewer)
 
-pdata = pd.read_csv('data/portfolio.csv', parse_dates=['date'], index_col='date')
-portfolio = Portfolio(env, pdata)
-stats = portfolio.status()
+transactions = pd.read_csv('data/portfolio.csv', parse_dates=['date'], index_col='date')
+portfolio = StockPortfolio.fromTransactions(env,transactions)
+cur = SpendingStats(portfolio)
+
+stats = PortfolioTable(portfolio).getOverviewTable()
 viewer = builder.get_object("portfolioView")
-portfolioViewer = PandasViewer(stats, viewer)
+columnFormats = {'Gain':"{:.2%}",
+        'Percentage':"{:.2%}",
+        'Value':"{:0.2f}",
+        'Amount' : "{:0.2f}"}
+portfolioViewer = PandasViewer(stats, viewer, columnFormats)
+
+performanceLabel = builder.get_object("PortfolioNumbers")
+cgain = cur.getGain()
+creturn = cur.getReturn()
+cvalue = cur.getValue()
+performanceLabel.set_text(f"Gain: {cgain:.3f}, "
+        f"Return: {creturn:.2f}, Value: {cvalue:.0f}")
 
 contentBox = builder.get_object("contentBox")
-pplot = PortfolioPlot(portfolio)
+pplot = PortfolioPlot(portfolio, 360)
 canvas = FigureCanvas(pplot.getFigure())
 canvas.set_size_request(400, 400)
 contentBox.add(canvas)
-
-performanceLabel = builder.get_object("PortfolioNumbers")
-gains = portfolio.getGain()
-returns = portfolio.getReturn()
-performanceLabel.set_text(f"Gain: {gains:.3f}, Return: {returns:.2f}")
 
 window = builder.get_object("basicStockEditor")
 window.show_all()

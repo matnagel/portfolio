@@ -1,61 +1,131 @@
 import pandas as pd
 import datetime as dt
 
+import toolz
+
+class HasSpending:
+    def getGainAtTimes(self, times):
+        return self.getValueAtTimes(times) / self.getSpentAtTimes(times)
+    def getReturnAtTimes(self, times):
+        return self.getValueAtTimes(times) - self.getSpentAtTimes(times)
+
+class Stock():
+    def __init__(self, env, isin):
+        self.isin = isin
+        self.prices = env.lookupPrices(isin)
+        self.name = env.lookupName(isin)
+    def getValueAtTimes(self, times):
+        values = self.prices.reindex(times, method='ffill')
+        return values
+    def learnPricesFromTransactions(self, transactions):
+        tprice = transactions['spent'] / transactions['amount']
+        tprice = tprice[tprice > 0]
+        self.prices = pd.concat([self.prices, tprice]).sort_index()
+        self.prices = self.prices.groupby(level=0).last()
+    def __str__(self):
+        return self.name
+
+class StockPosition(HasSpending):
+    def __init__(self, env, isin, transactions):
+        self.stock = Stock(env, isin)
+        transactions = transactions[transactions['isin'] == isin]
+        self.stock.learnPricesFromTransactions(transactions)
+        self.amount = transactions['amount'].cumsum()
+        self.amount = self.amount.groupby(level=0).last()
+        self.spent = transactions['spent'].cumsum()
+        self.spent = self.spent.groupby(level=0).last()
+    def getValueAtTimes(self, times):
+        amount = self.getAmountAtTimes(times)
+        valueAtTimes = self.stock.getValueAtTimes(times)*amount
+        valueAtTimes[amount == 0] = 0
+        return valueAtTimes
+    def getAmountAtTimes(self, times):
+        amountAtTimes = self.amount.reindex(times, method='ffill', fill_value = 0)
+        return amountAtTimes
+    def getSpentAtTimes(self,times):
+        spentAtTimes = self.spent.reindex(times, method='ffill', fill_value = 0)
+        return spentAtTimes
+    def __str__(self):
+        return f"Position in {self.stock.name} has spent {self.spent.iloc[-1]}"
+
+class StockPortfolio(HasSpending):
+    def __init__(self, holdings):
+        self.holdings = holdings
+    def getValueAtTimes(self, times):
+        valueDict = self.mapHoldings(lambda p : p.getValueAtTimes(times))
+        return sum(valueDict.values())
+    def mapHoldings(self, f):
+        return toolz.valmap(f, self.holdings)
+    def getSpentAtTimes(self, times):
+        spentDict = self.mapHoldings(lambda p : p.getSpentAtTimes(times))
+        return sum(spentDict.values())
+    def getPercentagesAtTimes(self, times):
+        totalValue = self.getValueAtTimes(times)
+        perc = self.mapHoldings(lambda p : p.getValueAtTimes(times) / totalValue)
+        return perc
+    @staticmethod
+    def fromTransactions(env, transactions):
+        holdings = {}
+        for isin in transactions['isin'].unique():
+            pos = StockPosition(env, isin, transactions)
+            holdings[isin] = pos
+        return StockPortfolio(holdings)
+
 class Environment:
-    def __init__(self):
-        self.isins = pd.read_csv('data/isin.csv', index_col='isin')
-        self.history = pd.read_csv('data/history.csv', parse_dates=['date'], index_col='date')
+    def __init__(self, isins, history):
+        self.isins = isins
+        self.history = history
     def truncate(self):
         curisin = self.isins.index.values
         self.history = self.history[self.history['isin'].isin(curisin)]
     def writeBack(self):
         self.history.to_csv('data/history.csv')
+    def lookupPrices(self, isin):
+        return self.history[self.history['isin'] == isin]['last']
+    def lookupName(self, isin):
+        return self.isins.loc[isin]['name']
+    @staticmethod
+    def withStandardPaths():
+        isins = pd.read_csv('data/isin.csv', index_col='isin')
+        history = pd.read_csv('data/history.csv', parse_dates=['date'], index_col='date')
+        return Environment(isins, history)
 
-class Portfolio:
-    def __init__(self, env, pf):
-        self.bigtable = pd.concat([env.history,pf],sort=False)[['isin','last','amount','spent']]
-        self.bigtable.sort_index(inplace=True)
-        self.bigtable.rename(columns={'amount':'transactionAmount', 'last':'currentPriceOfStock', 'spent':'transactionSpent'}, inplace=True)
-        self.bigtable = self.bigtable.join(env.isins,on='isin')
-
-        self.bigtable['transactionSpent'].fillna(0, inplace=True)
-        self.bigtable['transactionAmount'].fillna(0, inplace=True)
-        self.bigtable['amountOfStock'] = self.bigtable.groupby('isin')['transactionAmount'].transform(pd.Series.cumsum)
-        self.bigtable['spentOnStock'] = self.bigtable.groupby('isin')['transactionSpent'].transform(pd.Series.cumsum)
-        self.bigtable['spentPerStock'] = self.bigtable['spentOnStock'] / self.bigtable['amountOfStock']
-        self.bigtable['currentPriceOfStock'] = self.bigtable.groupby('isin')['currentPriceOfStock'].transform(lambda x: x.fillna(method='ffill'))
-        self.bigtable['valueOfStock'] = self.bigtable['currentPriceOfStock']*self.bigtable['amountOfStock']
-        self.bigtable['gainOnStock'] = (self.bigtable['valueOfStock'] - self.bigtable['spentOnStock']) / self.bigtable['spentOnStock']
-        self.bigtable['spentOnPortfolio'] = self.bigtable['transactionSpent'].cumsum()
-        self.bigtable['totalValueOfPortfolio'] = self.computeTotalValueColumn(self.bigtable)
-        self.bigtable['percentageOfPortfolio'] = self.bigtable['valueOfStock'] / self.bigtable['totalValueOfPortfolio']
-
-    def computeTotalValueColumn(self, df):
-        lastSeenValue = dict()
-        arr = []
-        for index, row in df.iterrows():
-            val = row['valueOfStock']
-            if pd.notna(val):
-                lastSeenValue[row['isin']] = row['valueOfStock']
-            arr.append(sum(lastSeenValue.values()))
-        self.totalValue = sum(lastSeenValue.values())
-        return pd.Series(arr, index=df.index)
-
-    def status(self):
-        stat = self.bigtable.groupby('isin').last()[['name','gainOnStock', 'currentPriceOfStock','amountOfStock','spentOnStock','valueOfStock','percentageOfPortfolio']]
-        return stat[stat['amountOfStock'] > 0]
-    def report(self):
-        stat = self.bigtable.groupby('isin').last()[['name', 'gainOnStock', 'percentageOfPortfolio', 'spentPerStock', 'amountOfStock']]
-        stat = stat[stat['amountOfStock'] > 0]
-        stat = stat[['name', 'percentageOfPortfolio', 'spentPerStock']]
-        for index, row in stat.iterrows():
-            print(f"{row['name']:>20} {row['percentageOfPortfolio']:>5.1%} @{row['spentPerStock']:.2f}")
-
+class SpendingStats:
+    def __init__(self, flowable):
+        self.times = pd.date_range(end=pd.datetime.now(), periods=1, freq='D')
+        self.value = flowable.getValueAtTimes(self.times).iloc[-1]
+        self.gain = flowable.getGainAtTimes(self.times).iloc[-1]
+        self.spent = flowable.getSpentAtTimes(self.times).iloc[-1]
+    def getValue(self):
+        return self.value
     def getGain(self):
-        return self.totalValue / self.bigtable['spentOnPortfolio'].iloc[-1]
+        return self.gain
+    def getSpent(self):
+        return self.spent
     def getReturn(self):
-        return self.totalValue - self.bigtable['spentOnPortfolio'].iloc[-1]
+        return self.value - self.spent
+    def getTWR(self):
+        return 0
 
-env = Environment()
-pf = pd.read_csv('data/portfolio.csv', parse_dates=['date'], index_col='date')
-port = Portfolio(env,pf)
+class PositionStats(SpendingStats):
+    def __init__(self, position):
+        SpendingStats.__init__(self, position)
+        self.amount = position.getAmountAtTimes(self.times).iloc[-1]
+    def getAmount(self):
+        return self.amount
+
+class PortfolioTable:
+    def __init__(self, portfolio):
+        super
+        self.portfolio = portfolio
+    def getOverviewTable(self):
+        statDict = self.portfolio.mapHoldings(lambda p :
+                [p.stock.name, SpendingStats(p).getGain()-1,
+                    SpendingStats(p).getValue(), PositionStats(p).getAmount()])
+        statDict = toolz.itemfilter(lambda item: item[1][-1] > 0, statDict)
+        return pd.DataFrame.from_dict(statDict, columns=['Name', 'Gain', 'Value', 'Amount'], orient='index')
+
+# env = Environment.withStandardPaths()
+# transactions = pd.read_csv('data/portfolio.csv', parse_dates=['date'], index_col='date')
+# portfolio = StockPortfolio.fromTransactions(env,transactions)
+# table = PortfolioTable(portfolio)

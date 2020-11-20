@@ -5,13 +5,9 @@ from matplotlib.figure import Figure
 from portfolio import *
 
 class PortfolioPlot:
-    def __init__(self, port):
-        self.index = pd.date_range(end=pd.datetime.now(), periods=60, freq='D')
-        self.returnSeries = port.bigtable['totalValueOfPortfolio'] / port.bigtable['spentOnPortfolio']
-
-        #Remove duplicates
-        self.returnSeries = self.returnSeries[~self.returnSeries.index.duplicated(keep='first')]
-        self.returnSeries = self.returnSeries.reindex(self.index, method='ffill')
+    def __init__(self, portfolio, days):
+        self.index = pd.date_range(end=pd.datetime.now(), periods=days, freq='D')
+        self.returnSeries = portfolio.getGainAtTimes(self.index)
     def plot(self):
         self.returnSeries.plot()
         plt.title('Portfolio gain')
