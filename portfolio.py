@@ -45,6 +45,8 @@ class StockPosition(HasSpending):
     def getSpentAtTimes(self,times):
         spentAtTimes = self.spent.reindex(times, method='ffill', fill_value = 0)
         return spentAtTimes
+    def getISIN(self):
+        return self.stock.isin
     def __str__(self):
         return f"Position in {self.stock.name} has spent {self.spent.iloc[-1]}"
 
@@ -104,8 +106,6 @@ class SpendingStats:
         return self.spent
     def getReturn(self):
         return self.value - self.spent
-    def getTWR(self):
-        return 0
 
 class PositionStats(SpendingStats):
     def __init__(self, position):
@@ -114,16 +114,29 @@ class PositionStats(SpendingStats):
     def getAmount(self):
         return self.amount
 
+class PortfolioStats(SpendingStats):
+    def __init__(self, portfolio):
+        SpendingStats.__init__(self, portfolio)
+        self.percentageDict = toolz.valmap(
+                lambda pvalue: pvalue.iloc[-1],
+                portfolio.getPercentagesAtTimes(self.times))
+    def getPercentageDict(self):
+        return self.percentageDict
+
 class PortfolioTable:
     def __init__(self, portfolio):
-        super
         self.portfolio = portfolio
     def getOverviewTable(self):
         statDict = self.portfolio.mapHoldings(lambda p :
-                [p.stock.name, SpendingStats(p).getGain()-1,
-                    SpendingStats(p).getValue(), PositionStats(p).getAmount()])
+                [p.stock.name,
+                 SpendingStats(p).getGain()-1,
+                 SpendingStats(p).getValue(),
+                 PositionStats(p).getAmount(),
+                 PortfolioStats(self.portfolio).getPercentageDict()[p.getISIN()]
+                ])
         statDict = toolz.itemfilter(lambda item: item[1][-1] > 0, statDict)
-        return pd.DataFrame.from_dict(statDict, columns=['Name', 'Gain', 'Value', 'Amount'], orient='index')
+        return pd.DataFrame.from_dict(statDict,
+                columns=['Name', 'Gain', 'Value', 'Amount', 'Percentage'], orient='index')
 
 # env = Environment.withStandardPaths()
 # transactions = pd.read_csv('data/portfolio.csv', parse_dates=['date'], index_col='date')
